@@ -19,12 +19,12 @@ int main()
     }
 
 
-    for (i = 0; i < 3; ++i) {
-        for (j = 0; j < 3; ++j) {
-            printf("%d ", C[i][j]);
-        }
-        printf("\n");
-    }
+    // for (i = 0; i < 3; ++i) {
+    //     for (j = 0; j < 3; ++j) {
+    //         printf("%d ", C[i][j]);
+    //     }
+    //     printf("\n");
+    // }
 
     return 0;
 }
