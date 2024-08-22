@@ -19,7 +19,7 @@
 
 using namespace llvm;
 
-int br = 0;
+int LoopNumber = 2;
 
 namespace {
     struct LoopTilingPass : public LoopPass {
@@ -27,8 +27,10 @@ namespace {
         const int TileSize = 2;
         std::unordered_map<Value *, Value *> VariablesMap;
         Value *LoopCounter, *LoopBound;
-        int BoundValue;
         Value *NewLoopCounter;
+        BasicBlock *InsertPositionHeader, *InsertPositionLatch;
+        std::vector<BasicBlock *> InnermostLoopBody;
+        bool IsInnermostLoop = false;
 
         static char ID; // Pass identification, replacement for typeid
         LoopTilingPass() : LoopPass(ID) {}
@@ -42,12 +44,6 @@ namespace {
                     }
                 }
             }
-//            for (auto &Var: VariablesMap) {
-//                Var.first->printAsOperand(errs(), false);
-//                errs() << " -> ";
-//                Var.second->printAsOperand(errs(), false);
-//                errs() << "\n";
-//            }
         }
 
         void findLoopCounterAndBound(Loop *L) {
@@ -55,15 +51,8 @@ namespace {
                 if (isa<ICmpInst>(&I)) {
                     LoopCounter = VariablesMap[I.getOperand(0)];
                     LoopBound = VariablesMap[I.getOperand(1)];
-                    if (ConstantInt * ConstInt = dyn_cast<ConstantInt>(LoopBound)) {
-                        BoundValue = ConstInt->getSExtValue();
-                    }
                 }
             }
-//            LoopCounter->printAsOperand(errs(), false);
-//            errs() << "\n";
-//            LoopBound->printAsOperand(errs(), false);
-//            errs() << " " << BoundValue << "\n";
         }
 
         void printBB(BasicBlock *BB) {
@@ -75,7 +64,6 @@ namespace {
         }
 
         void createNewAllocaInstr() {
-            // new variable for second loop counter
             BasicBlock &EntryBlock = F->getEntryBlock();
             BasicBlock::iterator InsertPos = EntryBlock.begin();
             while (isa<AllocaInst>(InsertPos)) {
@@ -84,116 +72,159 @@ namespace {
             IRBuilder<> Builder(&EntryBlock, InsertPos);
             AllocaInst *Alloca = Builder.CreateAlloca(Type::getInt32Ty(F->getContext()), nullptr, "");
             NewLoopCounter = Alloca;
-            errs() << *Alloca << "\n\n";
         }
 
-        void createNewLoopPreHeader(Loop *L) {
-            BasicBlock *before = L->getBlocksVector()[1]; // TODO get real position
-            BasicBlock *after = L->getBlocksVector()[2]; // TODO get real jump BB
+        BasicBlock *createNewLoop(BasicBlock *IP) {
+            BasicBlock *IPNext = IP->getNextNode();
 
-            BasicBlock *NewLoopPreHeader = BasicBlock::Create(F->getContext(), "", F, before);
+            BasicBlock *NewLoopPreHeader = BasicBlock::Create(F->getContext(), "", F, IPNext);
+            BasicBlock *BB1 = BasicBlock::Create(F->getContext(), "", F, IPNext);
+            BasicBlock *BB2 = BasicBlock::Create(F->getContext(), "", F, IPNext);
+            BasicBlock *BB3 = BasicBlock::Create(F->getContext(), "", F, IPNext);
+            BasicBlock *BB4 = BasicBlock::Create(F->getContext(), "", F, IPNext);
+
+            if (auto *Branch = dyn_cast<BranchInst>(IP->getTerminator())) {
+                Branch->setSuccessor(0, NewLoopPreHeader);
+            }
+
             IRBuilder<> Builder(NewLoopPreHeader);
             Value *LoadInst = Builder.CreateLoad(Type::getInt32Ty(F->getContext()), LoopCounter, "");
             VariablesMap[LoadInst] = LoopCounter;
             Builder.CreateStore(LoadInst, NewLoopCounter);
-            Builder.CreateBr(after);
+            Builder.CreateBr(BB1);
 
-            printBB(NewLoopPreHeader);
-        }
 
-        void createNewLoopHeader(Loop *L) {
-            BasicBlock *before = L->getBlocksVector()[1]; // TODO get real position
-            BasicBlock *after = L->getBlocksVector()[2]; // TODO get real jump BB
-
-            BasicBlock *BB1 = BasicBlock::Create(F->getContext(), "", F, before);
-            BasicBlock *BB2 = BasicBlock::Create(F->getContext(), "", F, before);
-            BasicBlock *BB3 = BasicBlock::Create(F->getContext(), "", F, before);
-            BasicBlock *BB4 = BasicBlock::Create(F->getContext(), "", F, before);
-
-            IRBuilder<> Builder(BB1);
-            // %25 = load i32, ptr %11, align 4     (load i)
+            Builder.SetInsertPoint(BB1);
             Value *LoadNewLoopCounter = Builder.CreateLoad(Type::getInt32Ty(F->getContext()), NewLoopCounter, "");
             VariablesMap[LoadNewLoopCounter] = NewLoopCounter;
-            // %26 = load i32, ptr %9, align 4      (load ii)
             Value *LoadLoopCounter = Builder.CreateLoad(Type::getInt32Ty(F->getContext()), LoopCounter, "");
             VariablesMap[LoadLoopCounter] = LoopCounter;
-            // %27 = add nsw i32 %26, 2             (ii + TileSize)
-            Value *Add = Builder.CreateNSWAdd(LoadLoopCounter, ConstantInt::get(Type::getInt32Ty(F->getContext()), TileSize), "");
-            // %28 = load i32, ptr %2, align 4      (load n)
+            Value *Add = Builder.CreateNSWAdd(LoadLoopCounter,
+                                              ConstantInt::get(Type::getInt32Ty(F->getContext()), TileSize), "");
             Value *LoadLoopBound = Builder.CreateLoad(Type::getInt32Ty(F->getContext()), LoopBound, "");
             VariablesMap[LoadLoopBound] = LoopBound;
-            // %29 = icmp slt i32 %27, %28          (ii + TileSize < n)
             Value *ICmp = Builder.CreateICmpSLT(Add, LoadLoopBound, "");
-            // br i1 %29, label %30, label %33
             Builder.CreateCondBr(ICmp, BB2, BB3);
 
-            printBB(BB1);
 
             Builder.SetInsertPoint(BB2);
             LoadLoopCounter = Builder.CreateLoad(Type::getInt32Ty(F->getContext()), LoopCounter, "");
             VariablesMap[LoadLoopCounter] = LoopCounter;
-            Add = Builder.CreateNSWAdd(LoadLoopCounter, ConstantInt::get(Type::getInt32Ty(F->getContext()), TileSize), "");
+            Add = Builder.CreateNSWAdd(LoadLoopCounter, ConstantInt::get(Type::getInt32Ty(F->getContext()), TileSize),
+                                       "");
             Builder.CreateBr(BB4);
 
-            printBB(BB2);
 
             Builder.SetInsertPoint(BB3);
             LoadLoopBound = Builder.CreateLoad(Type::getInt32Ty(F->getContext()), LoopBound, "");
             VariablesMap[LoadLoopBound] = LoopBound;
             Builder.CreateBr(BB4);
 
-            printBB(BB3);
 
             Builder.SetInsertPoint(BB4);
             PHINode *Phi = Builder.CreatePHI(Type::getInt32Ty(F->getContext()), 2, "");
             Phi->addIncoming(Add, BB2);
             Phi->addIncoming(LoadLoopBound, BB3);
             ICmp = Builder.CreateICmpSLT(LoadNewLoopCounter, Phi, "");
-            Builder.CreateCondBr(ICmp, after, after);
+            Builder.CreateCondBr(ICmp, IPNext, IPNext);
 
-            printBB(BB4);
+
+            return BB1;
         }
 
-        void createNewLoopLatch(Loop *L) {
-            BasicBlock *before = L->getBlocksVector()[1]; // TODO get real position
-            BasicBlock *after = L->getBlocksVector()[2]; // TODO get real jump BB
+        void createNewLoopLatch(Loop *L, BasicBlock *IP, BasicBlock *JumpPos) {
+            BasicBlock *PrevBlock = IP->getPrevNode();
 
-            BasicBlock *NewLoopLatch = BasicBlock::Create(F->getContext(), "", F, before);
+            BasicBlock *NewLoopLatch = BasicBlock::Create(F->getContext(), "", F, IP);
+
+            if (auto *Branch = dyn_cast<BranchInst>(PrevBlock->getTerminator())) {
+                Branch->setSuccessor(0, NewLoopLatch);
+            }
+
             IRBuilder<> Builder(NewLoopLatch);
             Value *LoadNewLoopCounter = Builder.CreateLoad(Type::getInt32Ty(F->getContext()), NewLoopCounter, "");
             VariablesMap[LoadNewLoopCounter] = NewLoopCounter;
-            Value *Add = Builder.CreateNSWAdd(LoadNewLoopCounter, ConstantInt::get(Type::getInt32Ty(F->getContext()), 1), "");
+            Value *Add = Builder.CreateNSWAdd(LoadNewLoopCounter,
+                                              ConstantInt::get(Type::getInt32Ty(F->getContext()), 1), "");
             Builder.CreateStore(Add, NewLoopCounter);
-            BranchInst *Br = Builder.CreateBr(after);
+            BranchInst *Br = Builder.CreateBr(JumpPos);
             MDNode *LoopMetadata = MDNode::get(F->getContext(), MDString::get(F->getContext(), "llvm.loop"));
             Br->setMetadata("llvm.loop", LoopMetadata);
 
-            printBB(NewLoopLatch);
         }
 
-        void createNewLoopExitBlock(Loop *L) {
-            BasicBlock *before = L->getBlocksVector()[1]; // TODO get real position
-            BasicBlock *after = L->getBlocksVector()[2]; // TODO get real jump BB
-
-            BasicBlock *NewLoopExitBlock = BasicBlock::Create(F->getContext(), "", F, before);
+        BasicBlock *createNewLoopExitBlock(BasicBlock *IP) {
+            BasicBlock *NewLoopExitBlock = BasicBlock::Create(F->getContext(), "", F, IP);
             IRBuilder<> Builder(NewLoopExitBlock);
-            Builder.CreateBr(after);
+            Builder.CreateBr(IP);
 
-            printBB(NewLoopExitBlock);
+
+            return NewLoopExitBlock;
+        }
+
+        void addEndLoopJump(BasicBlock *Header, BasicBlock *ExitBlock) {
+            BasicBlock *BB = Header;
+            while (BB) {
+                for (Instruction &I: *BB) {
+                    if (isa<PHINode>(&I)) {
+                        if (auto *Branch = dyn_cast<BranchInst>(BB->getTerminator())) {
+                            Branch->setSuccessor(1, ExitBlock);
+                        }
+                        return;
+                    }
+                }
+                BB = BB->getNextNode();
+            }
+        }
+
+        void updateIncrement(Loop *L) {
+            Value *Constant2 = ConstantInt::get(Type::getInt32Ty(F->getContext()), TileSize);
+            for (auto &I: *L->getLoopLatch()) {
+                if (auto *AddInst = dyn_cast<BinaryOperator>(&I)) {
+                    if (AddInst->getOpcode() == Instruction::Add) {
+                        AddInst->setOperand(1, Constant2);
+                    }
+                }
+            }
+        }
+
+        void replaceOldLoopCounter() {
+            for (auto &BB: InnermostLoopBody) {
+                for (Instruction &I: *BB) {
+                    if (LoadInst * LI = dyn_cast<LoadInst>(&I)) {
+                        Value *Ptr = LI->getPointerOperand();
+                        if (Ptr == LoopCounter) {
+                            LI->setOperand(0, NewLoopCounter);
+                        }
+                    }
+                }
+            }
         }
 
         bool runOnLoop(Loop *L, LPPassManager &LPM) override {
-            errs() << "\nLoop " << ++br << "\n\n";
+            errs() << "\nLoop " << LoopNumber-- << "\n\n";
             F = L->getHeader()->getParent();
             mapVariables(L);
             findLoopCounterAndBound(L);
-            
-            createNewAllocaInstr();
-            createNewLoopPreHeader(L);
-            createNewLoopHeader(L);
-            createNewLoopLatch(L);
-            createNewLoopExitBlock(L);
+            if (!IsInnermostLoop) {
+                InsertPositionHeader = L->getHeader();
+                InsertPositionLatch = L->getLoopLatch();
+                InnermostLoopBody = L->getBlocksVector();
+                InnermostLoopBody.erase(InnermostLoopBody.begin());
+                InnermostLoopBody.erase(InnermostLoopBody.end() - 1);
+                IsInnermostLoop = true;
+            }
 
+            createNewAllocaInstr();
+            BasicBlock *NewHeader = createNewLoop(InsertPositionHeader);
+            createNewLoopLatch(L, InsertPositionLatch, NewHeader);
+            BasicBlock *NewExitBlock = createNewLoopExitBlock(InsertPositionLatch);
+
+            addEndLoopJump(NewHeader, NewExitBlock);
+            updateIncrement(L);
+            replaceOldLoopCounter();
+
+            errs() << "Successfully performed Loop Tiling optimization!\n";
             return true;
         }
     };
