@@ -10,7 +10,8 @@ int main()
 
     for (int i = 0; i < n; i++) {
         for (int j = 0; j < m; j++) {
-            C[i][j] = A[i] * B[j];
+            if (i > j)
+                C[i][j] = A[i] * B[j];
         }
     }
 

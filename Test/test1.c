@@ -8,11 +8,9 @@ int main()
     int B[3][3] = {{9, 8, 7}, {6, 5, 4}, {3, 2, 1}};
     int C[3][3] = {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}};
 
-    int i, j, k;
-
-    for (i = 0; i < n; i++) {
-        for (j = 0; j < m; j++) {
-            for (k = 0; k < p; k++) {
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < m; j++) {
+            for (int k = 0; k < p; k++) {
                 C[i][j] += A[i][k] * B[k][j];
             }
         }
